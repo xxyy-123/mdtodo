@@ -4,13 +4,17 @@ The parser is intentionally dependency-free: it walks Markdown files, finds
 TODO-like markers and task-list checkboxes, and turns each hit into a
 ``TodoItem`` record. Nothing here touches the filesystem's *content* beyond
 reading text, which keeps the module easy to unit-test.
+
+Documentation usually *documents* the markers it talks about, so code is
+skipped by default: fenced blocks and inline code spans are masked out before
+a line is matched. Pass ``ignore_code=False`` to scan raw text instead.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable, Iterator, Sequence
 
 __all__ = [
@@ -18,6 +22,7 @@ __all__ = [
     "ALL_KINDS",
     "DEFAULT_KINDS",
     "MARKDOWN_SUFFIXES",
+    "mask_code",
     "parse_line",
     "scan_text",
     "iter_markdown_files",
@@ -65,6 +70,20 @@ DUE_RE = re.compile(r"@due\((?P<due>\d{4}-\d{1,2}-\d{1,2})\)")
 
 # Wrappers that commonly surround a marker in Markdown source.
 HTML_COMMENT_RE = re.compile(r"<!--|-->")
+
+# ```lang ... ``` or ~~~ ... ~~~; the opening fence may be indented.
+FENCE_RE = re.compile(r"^[ \t]*(?P<fence>`{3,}|~{3,})(?P<info>[^`~]*)$")
+
+# `code` or ``code with a `tick` inside``
+INLINE_CODE_RE = re.compile(r"(?P<ticks>`+)(?P<body>.+?)(?P=ticks)")
+
+# Characters that make an ``--exclude`` value a glob rather than a plain path.
+GLOB_CHARS_RE = re.compile(r"[*?\[]")
+
+# Directory names that never contain the notes people mean to scan.
+NOISE_DIRS = frozenset(
+    {".git", "node_modules", ".venv", "__pycache__", ".mypy_cache", ".tox"}
+)
 
 
 @dataclass(frozen=True)
@@ -140,53 +159,94 @@ def _normalise_date(raw: str) -> str:
     return f"{year:04d}-{month:02d}-{day:02d}"
 
 
+def _blank(length: int) -> str:
+    """Return *length* spaces, used to mask code without shifting columns."""
+    return " " * length
+
+
+def mask_code(lines: Sequence[str]) -> list[str]:
+    """Return *lines* with fenced blocks and inline code spans blanked out.
+
+    Masking replaces every character with a space instead of deleting it, so
+    offsets in the result still line up with the original line. That lets
+    detection run on masked text while the description is sliced from the raw
+    line, keeping inline code in the reported text.
+    """
+    masked: list[str] = []
+    fence: tuple[str, int] | None = None
+
+    for line in lines:
+        opening = FENCE_RE.match(line)
+        if fence is not None:
+            if (
+                opening
+                and opening.group("fence")[0] == fence[0]
+                and len(opening.group("fence")) >= fence[1]
+                and not opening.group("info").strip()
+            ):
+                fence = None
+            masked.append(_blank(len(line)))
+            continue
+        if opening:
+            fence = (opening.group("fence")[0], len(opening.group("fence")))
+            masked.append(_blank(len(line)))
+            continue
+        masked.append(INLINE_CODE_RE.sub(lambda m: _blank(len(m.group(0))), line))
+
+    return masked
+
+
 def parse_line(
     line: str,
     *,
     kinds: Sequence[str] = ALL_KINDS,
     include_checked: bool = False,
+    detect: str | None = None,
 ) -> tuple[str, str, str | None, tuple[str, ...], str | None, bool] | None:
     """Parse one line of Markdown.
 
     Returns ``(kind, text, owner, tags, due, checked)`` or ``None`` when the
     line holds no recognised item. ``kind`` is ``"TASK"`` for a bare checkbox
     and the marker keyword when a checkbox also carries one.
+
+    *detect* is the same line with code masked out; matching uses it while the
+    description is read from *line* so inline code survives in the output.
     """
+    scan = line if detect is None else detect
     wanted = {kind.upper() for kind in kinds}
     checked = False
-    body: str | None = None
-    owner: str | None = None
     kind: str | None = None
+    owner: str | None = None
+    body_start: int | None = None
 
-    task = TASK_LIST_RE.match(line)
+    task = TASK_LIST_RE.match(scan)
     if task:
         checked = task.group("state").strip().lower() == "x"
         if checked and not include_checked:
             return None
-        body = task.group("body")
-        rest = body or ""
-        marker = MARKER_RE.search(rest)
-        if marker and marker.group("kind").upper() in wanted:
+        body_start = task.start("body")
+        marker = MARKER_RE.search(scan, body_start)
+        if marker:
+            if marker.group("kind").upper() not in wanted:
+                # A checkbox line that carries an explicit marker which the
+                # caller filtered out; treat it as that marker, not as a task.
+                return None
             kind = marker.group("kind").upper()
             owner = (marker.group("owner") or "").strip() or None
-            body = marker.group("body")
-        elif marker:
-            # A checkbox line that carries an explicit marker which the caller
-            # filtered out; treat it as that marker, not as a bare task.
-            return None
+            body_start = marker.start("body")
         elif "TASK" in wanted:
             kind = "TASK"
     else:
-        marker = MARKER_RE.search(line)
+        marker = MARKER_RE.search(scan)
         if marker is None or marker.group("kind").upper() not in wanted:
             return None
         kind = marker.group("kind").upper()
         owner = (marker.group("owner") or "").strip() or None
-        body = marker.group("body")
+        body_start = marker.start("body")
 
-    if kind is None:
+    if kind is None or body_start is None:
         return None
-    body = (body or "").strip()
+    body = line[body_start:].strip()
 
     # Metadata first: ``@due(2026-1-5)`` must not be mistaken for a trailing
     # owner parenthetical, which is why this runs before the owner probe.
@@ -210,10 +270,16 @@ def scan_text(
     *,
     kinds: Sequence[str] = ALL_KINDS,
     include_checked: bool = False,
+    ignore_code: bool = True,
 ) -> Iterator[TodoItem]:
     """Yield every :class:`TodoItem` found in *text*."""
-    for number, raw in enumerate(text.splitlines(), start=1):
-        parsed = parse_line(raw, kinds=kinds, include_checked=include_checked)
+    raw_lines = text.splitlines()
+    scan_lines = mask_code(raw_lines) if ignore_code else raw_lines
+
+    for number, (raw, detection) in enumerate(zip(raw_lines, scan_lines), start=1):
+        parsed = parse_line(
+            raw, kinds=kinds, include_checked=include_checked, detect=detection
+        )
         if parsed is None:
             continue
         kind, body, owner, tags, due, checked = parsed
@@ -229,28 +295,59 @@ def scan_text(
         )
 
 
+def _matches_exclude(candidate: Path, relative: str, patterns: Sequence[str]) -> bool:
+    """Decide whether *candidate* is excluded by one of *patterns*.
+
+    A pattern containing ``*``, ``?`` or ``[`` is treated as a glob. Anything
+    else is a plain path: a bare name (``vendored``) excludes that path
+    component anywhere in the tree, while a relative path (``docs/archive``)
+    excludes that prefix.
+    """
+    posix_relative = PurePosixPath(relative)
+    for pattern in patterns:
+        pattern = pattern.strip()
+        if not pattern:
+            continue
+        if GLOB_CHARS_RE.search(pattern):
+            if candidate.match(pattern) or posix_relative.match(pattern):
+                return True
+            continue
+        plain = pattern.replace("\\", "/").strip("/")
+        if not plain:
+            continue
+        if plain in candidate.parts:
+            return True
+        if relative == plain or relative.startswith(plain + "/"):
+            return True
+    return False
+
+
 def iter_markdown_files(
     roots: Iterable[str | Path],
     *,
     suffixes: Sequence[str] = MARKDOWN_SUFFIXES,
     exclude: Sequence[str] = (),
 ) -> Iterator[Path]:
-    """Yield Markdown files under *roots*, skipping *exclude* glob patterns."""
+    """Yield Markdown files under *roots*, skipping *exclude* patterns."""
     lowered = {suffix.lower() for suffix in suffixes}
     for root in roots:
         root_path = Path(root)
         if root_path.is_file():
-            yield root_path
+            if not _matches_exclude(root_path, root_path.name, exclude):
+                yield root_path
             continue
         for candidate in sorted(root_path.rglob("*")):
             if not candidate.is_file():
                 continue
             if candidate.suffix.lower() not in lowered:
                 continue
-            parts = set(candidate.parts)
-            if parts & {".git", "node_modules", ".venv", "__pycache__", ".mypy_cache"}:
+            if set(candidate.parts) & NOISE_DIRS:
                 continue
-            if any(candidate.match(pattern) for pattern in exclude):
+            try:
+                relative = candidate.relative_to(root_path).as_posix()
+            except ValueError:  # pragma: no cover - defensive
+                relative = candidate.as_posix()
+            if _matches_exclude(candidate, relative, exclude):
                 continue
             yield candidate
 
@@ -262,6 +359,7 @@ def scan_paths(
     include_checked: bool = False,
     exclude: Sequence[str] = (),
     suffixes: Sequence[str] = MARKDOWN_SUFFIXES,
+    ignore_code: bool = True,
 ) -> list[TodoItem]:
     """Scan *roots* and return all items sorted by path then line number."""
     items: list[TodoItem] = []
@@ -280,6 +378,7 @@ def scan_paths(
                 display,
                 kinds=kinds,
                 include_checked=include_checked,
+                ignore_code=ignore_code,
             )
         )
     items.sort(key=lambda item: (item.path, item.line))

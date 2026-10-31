@@ -1,4 +1,4 @@
-﻿"""Tests for :mod:`mdtodo.cli`."""
+"""Tests for :mod:`mdtodo.cli`."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pathlib import Path
 
 from support import temp_workspace
 
+from mdtodo import __version__
 from mdtodo.cli import EXIT_NO_ITEMS, EXIT_OK, EXIT_USAGE, build_parser, main
 
 
@@ -135,6 +136,39 @@ class ReportCommandTests(CliTestCase):
         self.assertIn("Wrote 3 item(s)", out)
 
 
+class CodeAndExcludeFlagTests(CliTestCase):
+    def test_exclude_flag(self) -> None:
+        skip = self.root / "vendored"
+        skip.mkdir()
+        (skip / "old.md").write_text("TODO: ignored\n", encoding="utf-8")
+        code, out, _ = run_cli("scan", str(self.root), "--format", "json", "--exclude", "vendored")
+        self.assertEqual(code, EXIT_OK)
+        self.assertEqual(len(json.loads(out)), 3)
+
+    def test_exclude_flag_without_match_changes_nothing(self) -> None:
+        code, out, _ = run_cli("scan", str(self.root), "--format", "json", "--exclude", "nope")
+        self.assertEqual(len(json.loads(out)), 3)
+
+    def test_code_skipped_by_default(self) -> None:
+        (self.root / "guide.md").write_text(
+            "```markdown\nTODO: example only\n```\nTODO: real one\n", encoding="utf-8"
+        )
+        code, out, _ = run_cli("scan", str(self.root), "--format", "json")
+        texts = [item["text"] for item in json.loads(out)]
+        self.assertNotIn("example only", texts)
+        self.assertIn("real one", texts)
+
+    def test_include_code_flag(self) -> None:
+        (self.root / "guide.md").write_text(
+            "```markdown\nTODO: example only\n```\n", encoding="utf-8"
+        )
+        code, out, _ = run_cli(
+            "scan", str(self.root), "--format", "json", "--include-code"
+        )
+        texts = [item["text"] for item in json.loads(out)]
+        self.assertIn("example only", texts)
+
+
 class MetaTests(CliTestCase):
     def test_no_command_prints_help(self) -> None:
         code, out, _ = run_cli()
@@ -144,7 +178,7 @@ class MetaTests(CliTestCase):
     def test_version_command(self) -> None:
         code, out, _ = run_cli("version")
         self.assertEqual(code, EXIT_OK)
-        self.assertIn("mdtodo 0.1.0", out)
+        self.assertIn(f"mdtodo {__version__}", out)
 
     def test_bad_option_exits_two(self) -> None:
         with self.assertRaises(SystemExit) as ctx:

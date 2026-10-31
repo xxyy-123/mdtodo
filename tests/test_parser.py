@@ -12,6 +12,7 @@ from mdtodo.parser import (
     DEFAULT_KINDS,
     TodoItem,
     iter_markdown_files,
+    mask_code,
     parse_line,
     scan_paths,
     scan_text,
@@ -206,6 +207,129 @@ class FileScanTests(unittest.TestCase):
             (root / "a.rst").write_text("TODO: x\n", encoding="utf-8")
             found = list(iter_markdown_files([root], suffixes=(".rst",)))
             self.assertEqual([p.name for p in found], ["a.rst"])
+
+
+class CodeSkippingTests(unittest.TestCase):
+    """Markers inside code are examples, not real work items."""
+
+    FENCED = "\n".join(
+        [
+            "# Docs",
+            "",
+            "```markdown",
+            "TODO: shown as an example",
+            "```",
+            "",
+            "TODO: this one is real",
+            "",
+            "~~~",
+            "FIXME: tilde fence example",
+            "~~~",
+        ]
+    )
+
+    def test_fenced_block_is_skipped(self) -> None:
+        items = list(scan_text(self.FENCED, "docs.md"))
+        self.assertEqual([item.text for item in items], ["this one is real"])
+        self.assertEqual(items[0].line, 7)
+
+    def test_fenced_block_can_be_included(self) -> None:
+        items = list(scan_text(self.FENCED, "docs.md", ignore_code=False))
+        self.assertEqual(len(items), 3)
+
+    def test_indented_fence_opening(self) -> None:
+        text = "  ```\nTODO: example\n  ```\nTODO: real\n"
+        items = list(scan_text(text, "a.md"))
+        self.assertEqual([item.text for item in items], ["real"])
+
+    def test_unclosed_fence_runs_to_end_of_file(self) -> None:
+        text = "```\nTODO: example\nTODO: still example\n"
+        self.assertEqual(list(scan_text(text, "a.md")), [])
+
+    def test_inline_code_span_is_skipped(self) -> None:
+        text = "Use `TODO: x` to mark work.\nTODO: actual task\n"
+        items = list(scan_text(text, "a.md"))
+        self.assertEqual([item.text for item in items], ["actual task"])
+
+    def test_inline_code_in_description_is_preserved(self) -> None:
+        items = list(scan_text("TODO: call `parse_line` first\n", "a.md"))
+        self.assertEqual([item.text for item in items], ["call `parse_line` first"])
+
+    def test_double_backtick_span(self) -> None:
+        text = "``TODO: a `tick` inside``\nTODO: real\n"
+        items = list(scan_text(text, "a.md"))
+        self.assertEqual([item.text for item in items], ["real"])
+
+    def test_task_checkbox_in_fence_is_skipped(self) -> None:
+        text = "```\n- [ ] example task\n```\n- [ ] real task\n"
+        items = list(scan_text(text, "a.md"))
+        self.assertEqual([item.text for item in items], ["real task"])
+
+    def test_fence_lines_keep_line_numbers_aligned(self) -> None:
+        masked = mask_code(["```", "TODO: x", "```", "TODO: y"])
+        self.assertEqual(len(masked), 4)
+        self.assertEqual([len(line) for line in masked], [3, 7, 3, 7])
+        self.assertEqual(masked[0].strip(), "")
+        self.assertEqual(masked[3], "TODO: y")
+
+
+class ExcludePatternTests(unittest.TestCase):
+    """``--exclude`` accepts plain paths as well as globs."""
+
+    def _tree(self, root: Path) -> None:
+        (root / "keep.md").write_text("TODO: keep\n", encoding="utf-8")
+        for name in ("vendored", "docs/archive"):
+            target = root / name
+            target.mkdir(parents=True)
+            (target / "old.md").write_text("TODO: old\n", encoding="utf-8")
+
+    def _scanned(self, root: Path, *patterns: str) -> list[str]:
+        return [item.text for item in scan_paths([root], exclude=list(patterns))]
+
+    def test_bare_name_excludes_directory_anywhere(self) -> None:
+        with temp_workspace() as tmp:
+            root = Path(tmp)
+            self._tree(root)
+            self.assertEqual(self._scanned(root, "vendored"), ["old", "keep"])
+
+    def test_relative_path_excludes_prefix(self) -> None:
+        with temp_workspace() as tmp:
+            root = Path(tmp)
+            self._tree(root)
+            self.assertEqual(self._scanned(root, "docs/archive"), ["keep", "old"])
+
+    def test_both_plain_paths_together(self) -> None:
+        with temp_workspace() as tmp:
+            root = Path(tmp)
+            self._tree(root)
+            self.assertEqual(self._scanned(root, "vendored", "docs/archive"), ["keep"])
+
+    def test_glob_still_works(self) -> None:
+        with temp_workspace() as tmp:
+            root = Path(tmp)
+            self._tree(root)
+            self.assertEqual(
+                self._scanned(root, "**/archive/*.md"), ["keep", "old"]
+            )
+
+    def test_filename_glob_still_works(self) -> None:
+        with temp_workspace() as tmp:
+            root = Path(tmp)
+            self._tree(root)
+            self.assertEqual(self._scanned(root, "keep.md"), ["old", "old"])
+
+    def test_plain_path_does_not_match_substring(self) -> None:
+        with temp_workspace() as tmp:
+            root = Path(tmp)
+            (root / "vendored-notes").mkdir()
+            (root / "vendored-notes" / "a.md").write_text("TODO: a\n", encoding="utf-8")
+            self.assertEqual(self._scanned(root, "vendored"), ["a"])
+
+    def test_single_file_root_honours_exclude(self) -> None:
+        with temp_workspace() as tmp:
+            target = Path(tmp) / "one.md"
+            target.write_text("TODO: solo\n", encoding="utf-8")
+            self.assertEqual(scan_paths([target], exclude=["one.md"]), [])
 
 
 class DefaultsTests(unittest.TestCase):

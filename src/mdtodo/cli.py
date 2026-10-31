@@ -69,8 +69,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--exclude",
         action="append",
         default=[],
-        metavar="GLOB",
-        help="Skip files matching GLOB; repeatable.",
+        metavar="PATH_OR_GLOB",
+        help=(
+            "Skip a path or glob; repeatable. A bare name (vendored) skips that "
+            "directory anywhere, docs/archive skips that prefix, and patterns "
+            "with * ? [ are matched as globs."
+        ),
+    )
+    common.add_argument(
+        "--include-code",
+        action="store_true",
+        help="Also scan inside fenced code blocks and inline code (default: skip).",
     )
     common.add_argument(
         "--suffix",
@@ -117,6 +126,7 @@ def collect(args: argparse.Namespace) -> list:
         include_checked=args.include_checked,
         exclude=args.exclude,
         suffixes=tuple(args.suffixes) if args.suffixes else MARKDOWN_SUFFIXES,
+        ignore_code=not args.include_code,
     )
     if args.tags:
         wanted = {tag.lower() for tag in args.tags}
