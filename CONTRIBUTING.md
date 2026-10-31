@@ -10,8 +10,8 @@ cd mdtodo
 pip install -e .
 ```
 
-No third-party runtime dependencies. `pytest` and `ruff` are optional
-conveniences and are listed under the `dev` extra.
+No third-party runtime dependencies. `pytest` is an optional convenience listed
+under the `dev` extra; the suite itself only needs the standard library.
 
 ## Running tests
 

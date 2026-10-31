@@ -36,6 +36,8 @@ mdtodo scan --kind TODO        # only TODO, ignore FIXME/HACK/XXX/TASK
 mdtodo scan --tag backend      # only items tagged #backend
 mdtodo scan --owner alice      # only items assigned to alice
 mdtodo scan --format json      # machine readable
+mdtodo scan --exclude vendored # skip a directory (or docs/archive, or a glob)
+mdtodo scan --include-code     # also scan inside code blocks and inline code
 mdtodo stats                   # counts by kind, owner and tag
 mdtodo report --output TODO.md # write a Markdown report
 ```
@@ -60,6 +62,24 @@ A marker needs a colon (ASCII `:` or full-width `：`), which keeps prose like
 "a TODO list" from matching. Owners can be written as `TODO(alice):` or as a
 trailing parenthetical, `TODO: fix it (alice)`. Tags are `#word`; due dates are
 `@due(YYYY-M-D)` and are normalised to `YYYY-MM-DD`.
+
+Fenced code blocks and inline code spans are skipped by default, because a
+Markdown file that *documents* these markers would otherwise report its own
+examples. This README, for instance, scans clean. Pass `--include-code` when you
+really do want the contents of code blocks.
+
+## Excluding paths
+
+`--exclude` takes either a style of pattern:
+
+| Pattern | Meaning |
+| --- | --- |
+| `vendored` | skip any path component named `vendored`, at any depth |
+| `docs/archive` | skip that path prefix, relative to each scanned root |
+| `**/archive/*.md` | glob match, when the pattern contains `*`, `?` or `[` |
+
+Repeat the flag to add more patterns. Matching happens while walking the tree,
+so an excluded directory is never read at all.
 
 ## Project layout
 
