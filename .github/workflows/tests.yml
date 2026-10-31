@@ -31,4 +31,5 @@ jobs:
       - name: Smoke-test the console script
         run: |
           mdtodo version
-          mdtodo scan --kind TODO
+          python -c "import pathlib; pathlib.Path('smoke.md').write_text('TODO: smoke test\n', encoding='utf-8')"
+          mdtodo scan --kind TODO smoke.md
