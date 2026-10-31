@@ -16,7 +16,7 @@ actionable.
 ## Install
 
 ```bash
-git clone https://github.com/<you>/mdtodo.git
+git clone https://github.com/xxyy-123/mdtodo.git
 cd mdtodo
 pip install -e .
 ```
@@ -73,8 +73,16 @@ trailing parenthetical, `TODO: fix it (alice)`. Tags are `#word`; due dates are
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v
+PYTHONPATH=src python -m unittest discover -s tests -t tests -v
 ```
+
+On Windows PowerShell:
+
+```powershell
+$env:PYTHONPATH = "src"; python -m unittest discover -s tests -t tests -v
+```
+
+(The `-t tests` flag is what lets `test_*.py` import the `support` helper.)
 
 ## License
 
